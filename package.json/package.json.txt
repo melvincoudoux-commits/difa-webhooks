@@ -1,0 +1,9 @@
+{
+  "name": "difa-webhooks",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "vercel dev"
+  }
+}
