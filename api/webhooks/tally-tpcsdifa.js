@@ -155,102 +155,59 @@ module.exports = async function handler(req, res) {
   try {
     const body = req.body || {};
     const data = body.data || {};
+    const fields = Array.isArray(data.fields) ? data.fields : [];
 
-    // 1) Email – tester plusieurs clés fréquentes
-    const email =
-      data.email ||
-      data["Email"] ||
-      data["E-mail"] ||
-      data["Adresse email"] ||
-      data["Adresse e-mail"] ||
-      (body.user && body.user.email) ||
-      body.email ||
-      null;
-
+    // 1) Email — chercher dans data.fields (INPUT_EMAIL ou label contenant 'mail')
+    let email = null;
+    for (const f of fields) {
+      const lbl = (f.label || "").toString();
+      if (f.type === "INPUT_EMAIL" || /mail/i.test(lbl)) {
+        email = f.value;
+        break;
+      }
+    }
     if (!email) {
-      console.warn("DEBUG: Missing email | topKeys:", Object.keys(body), "| dataKeys:", Object.keys(data));
+      console.warn("DEBUG: Missing email in fields[]");
+      return res.status(400).json({ ok: false, error: "Missing email (fields)" });
+    }
+
+    // (optionnel) Prénom pour personnaliser l’email
+    const firstNameField = fields.find(f => f.type === "INPUT_TEXT" && /pr[ée]nom/i.test(f.label || ""));
+    const firstName = firstNameField?.value || "";
+
+    // 2) Réponses — prendre les 24 premiers LINEAR_SCALE dans l'ordre
+    const scaleItems = fields.filter(f => f.type === "LINEAR_SCALE");
+    if (scaleItems.length < 24) {
+      console.warn("DEBUG: Not enough LINEAR_SCALE items:", scaleItems.length);
       return res.status(400).json({
         ok: false,
-        error: "Missing email",
-        topKeys: Object.keys(body),
-        dataKeys: Object.keys(data)
+        error: `Need 24 LINEAR_SCALE items, got ${scaleItems.length}`
       });
     }
 
-    // 2) Réponses – accepter différents formats
-    // a) format tableau : body.answers = [{ key:"1", value:"Plutôt d'accord" }, ...]
-    let answersObj = {};
-    if (Array.isArray(body.answers)) {
-      for (const it of body.answers) {
-        if (!it) continue;
-        answersObj[String(it.key)] = it.value;
-      }
-    }
-
-    // b) format objet : data["1"]..["24"] ou "Q1".."Q24"
-    if (Object.keys(answersObj).length === 0) {
-      for (let i = 1; i <= 24; i++) {
-        const kNum = String(i);
-        const kQ = "Q" + i;
-        if (kNum in data) answersObj[kNum] = data[kNum];
-        else if (kQ in data) answersObj[kNum] = data[kQ];
-      }
-    }
-
-    // c) certains formulaires Tally envoient "answers" comme objet
-    if (Object.keys(answersObj).length === 0 && data.answers && typeof data.answers === "object") {
-      for (let i = 1; i <= 24; i++) {
-        const kNum = String(i);
-        if (kNum in data.answers) answersObj[kNum] = data.answers[kNum];
-      }
-    }
-
-    // 3) Mapping libellés Likert -> score [-3..+3]
-    const MAP = {
-      "-3": -3, "-2": -2, "-1": -1, "0": 0, "1": 1, "2": 2, "3": 3,
-      "pas du tout d'accord": -3,
-      "plutot pas d'accord": -1,
-      "plutôt pas d'accord": -1,
-      "neutre": 0,
-      "plutot d'accord": 1,
-      "plutôt d'accord": 1,
-      "tout a fait d'accord": 3,
-      "tout à fait d'accord": 3
-    };
-
-    function toScore(x) {
-      if (x === null || x === undefined) return null;
-      if (typeof x === "number") {
-        if (x >= -3 && x <= 3) return x;
-        return null;
-      }
-      const s = normalize(x);
-      if (s in MAP) return MAP[s];
-      const maybeNum = Number(s);
-      if (Number.isFinite(maybeNum) && maybeNum >= -3 && maybeNum <= 3) return maybeNum;
-      return null;
-    }
-
-    // 4) Construire { "1":int, ... "24":int }
+    // Construire answers { "1": int, ..., "24": int }
     const answers = {};
-    for (let i = 1; i <= 24; i++) {
-      const raw = answersObj[String(i)];
-      const sc = toScore(raw);
-      if (sc === null) {
-        console.warn("DEBUG: Invalid answer", i, "raw:", raw);
-        return res.status(400).json({ ok: false, error: `Invalid answer #${i}`, raw });
+    for (let i = 0; i < 24; i++) {
+      const v = Number(scaleItems[i].value);
+      if (!Number.isFinite(v) || v < -3 || v > 3) {
+        console.warn("DEBUG: Invalid LINEAR_SCALE value at index", i, "raw:", scaleItems[i].value);
+        return res.status(400).json({
+          ok: false,
+          error: `Invalid LINEAR_SCALE at #${i+1}`,
+          raw: scaleItems[i].value
+        });
       }
-      answers[String(i)] = sc;
+      answers[String(i + 1)] = v;
     }
 
-    // 5) Calcul TPCS
-    const respondentId = data.respondent_id || body.submissionId || body.submission_id || "unknown";
+    // 3) Calcul TPCS
+    const respondentId = data.respondentId || data.submissionId || body.submissionId || "unknown";
     const result = scoreTPCS(respondentId, answers);
 
-    // 6) Email (plain text simple pour test – tu pourras remplacer par HTML)
+    // 4) Email (plain text simple pour test – tu pourras remplacer par HTML)
     const subject = `Ton résultat TPCS-DIFA : ${result.family} (${result.code_4L})`;
     const text =
-`Bonjour,
+`Bonjour ${firstName || ""},
 
 Merci d'avoir passé le test TPCS-DIFA.
 Famille : ${result.family}
@@ -270,7 +227,7 @@ L'équipe DIFA`;
       return res.status(500).json({ ok: false, error: "Email send failed" });
     }
 
-    // 7) Réponse OK
+    // 5) Réponse OK
     return res.status(200).json({
       ok: true,
       email,
