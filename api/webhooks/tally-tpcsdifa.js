@@ -246,3 +246,7 @@ L'équipe DIFA`;
     return res.status(500).json({ ok: false, error: "Server error", detail: e && e.message });
   }
 };
+
+module.exports.config = { runtime: 'nodejs18.x' };
+// (ou 'nodejs20.x' si ton projet est configuré en Node 20)
+
