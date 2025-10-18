@@ -1,3 +1,39 @@
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  // --- DEBUG : journaliser tout le payload pour l'inspecter dans Vercel
+  try { console.log("TALLY RAW BODY:", JSON.stringify(req.body)); } catch {}
+
+  try {
+    const body = req.body ?? {};
+    const data = body.data ?? {};
+
+    // 1) Email : tester plusieurs clés possibles
+    const email =
+      data.email ||
+      data["Email"] ||
+      data["E-mail"] ||
+      data["Adresse email"] ||
+      data["Adresse e-mail"] ||
+      body.user?.email ||
+      body.email ||
+      null;
+
+    if (!email) {
+      console.warn("DEBUG: Missing email | keys:", Object.keys(body), "dataKeys:", Object.keys(data));
+      // on renvoie la raison pour que tu la voies même si les logs ne s'affichent pas
+      return res.status(400).json({
+        ok: false,
+        error: "Missing email",
+        topKeys: Object.keys(body),
+        dataKeys: Object.keys(data)
+      });
+    }
+
+    // ... (la suite inchangée : construction des 24 réponses, calcul, envoi email)
 // api/webhooks/tally-tpcsdifa.js
 //
 // Webhook Tally → calcul TPCS-DIFA v3.1 (deterministic) → email par Famille (Alpha/Beta/Gamma/Delta)
