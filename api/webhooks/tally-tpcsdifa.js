@@ -247,5 +247,7 @@ L'équipe DIFA`;
   }
 };
 
+// Force le runtime Node.js 18 pour cette fonction
+module.exports.config = { runtime: 'nodejs18.x' };
 
 

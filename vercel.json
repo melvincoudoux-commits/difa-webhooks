@@ -1,8 +1,0 @@
-{
-  "functions": {
-    "api/webhooks/tally-tpcsdifa.js": {
-      "runtime": "@vercel/node@2.15.10"
-    }
-  }
-}
-
