@@ -13,6 +13,12 @@ function normalize(str) {
 }
 
 // ----------------------
+console.log("ENV DEBUG:", {
+  has_SMTP_USER: !!process.env.SMTP_USER,
+  has_SMTP_PASS: !!process.env.SMTP_PASS,
+  from_email: process.env.FROM_EMAIL || null
+});
+
 // Envoi d'e-mail via Gmail (SMTP) avec nodemailer
 async function sendEmail(to, subject, text) {
   try {
