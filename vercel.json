@@ -1,9 +1,8 @@
 {
   "functions": {
     "api/webhooks/tally-tpcsdifa.js": {
-      "runtime": "nodejs18.x",
-      "memory": 256,
-      "maxDuration": 10
+      "runtime": "@vercel/node@2.15.10"
     }
   }
 }
+

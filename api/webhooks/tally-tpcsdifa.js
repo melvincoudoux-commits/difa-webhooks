@@ -247,6 +247,5 @@ L'équipe DIFA`;
   }
 };
 
-module.exports.config = { runtime: 'nodejs18.x' };
-// (ou 'nodejs20.x' si ton projet est configuré en Node 20)
+
 
