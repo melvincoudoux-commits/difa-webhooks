@@ -13,34 +13,33 @@ function normalize(str) {
 }
 
 // ----------------------
-// Envoi d'email minimal via Resend (si variables absentes -> on n'échoue pas)
+// Envoi d'e-mail via Gmail (SMTP) avec nodemailer
 async function sendEmail(to, subject, text) {
   try {
-    const apiKey = process.env.RESEND_API_KEY;
-    const from = process.env.FROM_EMAIL; // ex: "DIFA <startdifa@gmail.com>"
-    if (!apiKey || !from) {
-      console.warn("EMAIL DISABLED: missing RESEND_API_KEY or FROM_EMAIL – pretending success");
-      return true; // ne bloque pas le flux pendant les tests
-    }
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ from, to, subject, text })
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      console.error("Resend error:", t);
+    const user = process.env.SMTP_USER;   // ex: "startdifa@gmail.com"
+    const pass = process.env.SMTP_PASS;   // mot de passe d’application (16 caractères)
+    const from = process.env.FROM_EMAIL || `DIFA <${user}>`;
+
+    if (!user || !pass) {
+      console.error("EMAIL DESACTIVE : SMTP_USER ou SMTP_PASS manquant");
       return false;
     }
+
+    const nodemailer = require("nodemailer");
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass }
+    });
+
+    const info = await transporter.sendMail({ from, to, subject, text });
+    console.log("GMAIL ENVOYE :", info.messageId);
     return true;
   } catch (e) {
-    console.error("Resend exception:", e);
+    console.error("ERREUR ENVOI GMAIL :", e);
     return false;
   }
 }
+
 
 // ----------------------
 // Calcul TPCS-DIFA (deterministic)
