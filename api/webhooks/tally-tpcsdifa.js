@@ -48,101 +48,92 @@ async function sendEmail(to, subject, text) {
 
 
 // ----------------------
-// Calcul TPCS-DIFA (deterministic)
-function scoreTPCS(respondent_id, answersObj) {
-  const INV = new Set([2,4,6,8,10,12,14,16,18,20,22,24]);
+// ---------------- TPCS-DIFA — CALCUL OFFICIEL (L/A/R/C) ----------------
 
-  function v(i) {
-    const raw = Number(answersObj[String(i)]);
-    if (!Number.isFinite(raw)) throw new Error(`Réponse manquante ou invalide pour l’item ${i}`);
-    if (raw < -3 || raw > 3) throw new Error(`Item ${i} hors plage [-3,3]`);
-    return INV.has(i) ? -raw : raw;
+/** Choix du tie-break si un score = 0.
+ *  Par défaut: on tranche avec D6 (règle v3.1).
+ *  Pour d'abord trancher avec D5 puis D6 en secours, remplace par: ["D5","D6"].
+ */
+const TIE_BREAK_ORDER = ["D6"];
+
+/** Convertit les 24 LINEAR_SCALE Tally en {1..24: -3..+3} */
+function extractAnswersFromTallyFields(fields) {
+  const scales = fields.filter(f => f.type === "LINEAR_SCALE");
+  if (scales.length < 24) {
+    throw new Error(`Pas assez d'items LINEAR_SCALE (trouvés: ${scales.length}, attendus: 24)`);
   }
+  const answers = {};
+  for (let i = 1; i <= 24; i++) {
+    const v = Number(scales[i-1].value ?? 0);
+    if (v < -3 || v > 3) throw new Error(`Item ${i}: valeur hors plage ${v}`);
+    answers[i] = v;
+  }
+  return answers;
+}
 
-  const D1 = v(1)+v(2)+v(3)+v(4);
-  const D2 = v(5)+v(6)+v(7)+v(8);
-  const D3 = v(9)+v(10)+v(11)+v(12);
-  const D4 = v(13)+v(14)+v(15)+v(16);
-  const D5 = v(17)+v(18)+v(19)+v(20);
-  const D6 = v(21)+v(22)+v(23)+v(24);
+/** Calcul complet (scores, code L/A/R/C, famille/type 16-profils) */
+function scoreTPCS_LARC(answers) {
+  const inv = new Set([2,4,6,8,10,12,14,16,18,20,22,24]);
+  const v = (i) => inv.has(i) ? -(Number(answers[i] ?? 0)) : Number(answers[i] ?? 0);
 
-  const intensity = (s) => {
-    const a = Math.abs(s);
-    if (a === 0) return "none";
-    if (a <= 2) return "light";
-    if (a <= 5) return "moderate";
-    if (a <= 8) return "marked";
-    return "very_marked";
+  // Sommes par dimension
+  const D1 = v(1)+v(2)+v(3)+v(4);       // Attention: L vs F
+  const D2 = v(5)+v(6)+v(7)+v(8);       // Récompense: A vs I
+  const D3 = v(9)+v(10)+v(11)+v(12);    // Émotion: R vs E
+  const D4 = v(13)+v(14)+v(15)+v(16);   // Décision: C vs D
+  const D5 = v(17)+v(18)+v(19)+v(20);   // Contexte
+  const D6 = v(21)+v(22)+v(23)+v(24);   // Introspection
+
+  // Polarités (L/A/R/C) avec "OU" si 0
+  const pole = (s, pos, neg) => s>0 ? pos : (s<0 ? neg : "OU");
+
+  let L1 = pole(D1, "L", "F"); // Large vs Focalisé
+  let L2 = pole(D2, "A", "I"); // Activé vs Inhibé
+  let L3 = pole(D3, "R", "E"); // Régulés vs Réactifs
+  let L4 = pole(D4, "C", "D"); // Constructifs vs Défensifs
+
+  // Tie-breaks si "OU"
+  const tiePick = (neutralLetter, pos, neg) => {
+    if (neutralLetter !== "OU") return neutralLetter;
+    for (const key of TIE_BREAK_ORDER) {
+      const s = (key === "D5" ? D5 : D6);
+      if (s > 0) return pos;
+      if (s < 0) return neg;
+    }
+    return neutralLetter; // reste "OU" si tout est neutre
   };
 
-  const pole = (s, pos, neg) => (s > 0 ? pos : (s < 0 ? neg : "neutral"));
+  L1 = tiePick(L1, "L", "F");
+  L2 = tiePick(L2, "A", "I");
+  L3 = tiePick(L3, "R", "E");
+  L4 = tiePick(L4, "C", "D");
 
-  let L1 = pole(D1,"E","F");
-  let L2 = pole(D2,"A","I");
-  let L3 = pole(D3,"R","E");
-  let L4 = pole(D4,"C","D");
+  const code_4L = `${L1}${L2}${L3}${L4}`; // ex: LIRD
 
-  // Tie-break via D6 si neutral
-  if (L1 === "neutral") L1 = (D6 > 0 ? "E" : "F");
-  if (L2 === "neutral") L2 = (D6 > 0 ? "A" : "I");
-  if (L3 === "neutral") L3 = (D6 > 0 ? "R" : "E");
-  if (L4 === "neutral") L4 = (D6 > 0 ? "C" : "D");
+  // Famille (D1×D2)
+  // L+A = Dynamiques | L+I = Inspirés | F+A = Centrés | F+I = Réceptifs
+  let famille;
+  if (L1 === "L" && L2 === "A") famille = "Dynamique";
+  else if (L1 === "L" && L2 === "I") famille = "Inspiré";
+  else if (L1 === "F" && L2 === "A") famille = "Centré";
+  else if (L1 === "F" && L2 === "I") famille = "Réceptif";
+  else famille = "Indéterminé"; // cas rare si "OU" subsiste
 
-  const code_4L = `${L1}${L2}${L3}${L4}`;
-
-  const family =
-    (L3 === "R" && L4 === "C") ? "Alpha" :
-    (L3 === "R" && L4 === "D") ? "Beta"  :
-    (L3 === "E" && L4 === "C") ? "Gamma" :
-                                  "Delta";
-
-  // Qualité (cohérence miroirs + variabilité)
-  const pairs = [[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]];
-  let diffSum = 0;
-  for (const [d,i] of pairs) {
-    const direct = Number(answersObj[String(d)]);
-    const invraw = Number(answersObj[String(i)]);
-    diffSum += Math.abs(direct - (-invraw));
-  }
-  const meanDiff = diffSum / pairs.length;
-  const mirror_consistency = 1 - (meanDiff / 6);
-
-  const vals = Array.from({ length: 24 }, (_, k) => Number(answersObj[String(k + 1)]));
-  const m = vals.reduce((a, b) => a + b, 0) / vals.length;
-  const stdev = Math.sqrt(vals.reduce((a, x) => a + (x - m) ** 2, 0) / vals.length);
-
-  const flags = [];
-  if (mirror_consistency < 0.70) flags.push("low_consistency");
-  if (stdev < 0.70)              flags.push("low_variability");
-  if (Math.max(Math.abs(D1),Math.abs(D2),Math.abs(D3),Math.abs(D4),Math.abs(D5),Math.abs(D6)) > 10) {
-    flags.push("atypical_profile");
-  }
-  if (!flags.length) flags.push("ok");
-
-  const introspection_level =
-    (D6 >=  8) ? "hyper-introspective" :
-    (D6 >=  4) ? "introspective" :
-    (D6 >=  1) ? "slightly-introspective" :
-    (D6 >= -3) ? "balanced" :
-    (D6 >= -7) ? "mechanical" : "hyper-mechanical";
+  // Type (D3×D4)
+  // R+C = Alpha | R+D = Beta | E+C = Gamma | E+D = Delta
+  let type;
+  if (L3 === "R" && L4 === "C") type = "Alpha";
+  else if (L3 === "R" && L4 === "D") type = "Beta";
+  else if (L3 === "E" && L4 === "C") type = "Gamma";
+  else if (L3 === "E" && L4 === "D") type = "Delta";
+  else type = "Mixte";
 
   return {
-    respondent_id,
-    scores: {
-      D1_attention: { raw: D1, polarity: L1, intensity: intensity(D1) },
-      D2_reward:    { raw: D2, polarity: L2, intensity: intensity(D2) },
-      D3_emotion:   { raw: D3, polarity: L3, intensity: intensity(D3) },
-      D4_decision:  { raw: D4, polarity: L4, intensity: intensity(D4) },
-      D5_context:   { raw: D5 },
-      D6_introspection: { raw: D6, level: introspection_level }
-    },
-    code_4L,
-    family,
-    quality: {
-      mirror_consistency,
-      response_variability: stdev,
-      flags
-    }
+    code_4L,                              // ex: "LIRD"
+    famille,                              // ex: "Inspiré"
+    type,                                 // ex: "Beta"
+    scores: { D1, D2, D3, D4, D5, D6 },   // sommes -12..+12
+    letters: { D1: L1, D2: L2, D3: L3, D4: L4 } // lettres finales
   };
 }
 
@@ -205,29 +196,38 @@ module.exports = async function handler(req, res) {
       answers[String(i + 1)] = v;
     }
 
-    // 3) Calcul TPCS
+       // 3) Calcul TPCS (version définitive L/A/R/C + 16 types)
     const respondentId = data.respondentId || data.submissionId || body.submissionId || "unknown";
-    const result = scoreTPCS(respondentId, answers);
+    let prof;
+    try {
+      prof = scoreTPCS_LARC_fromAnswers(answers); // <-- utilise le answers que tu viens de construire
+      console.log("TPCS LARC RESULT:", { respondentId, ...prof });
+    } catch (e) {
+      console.error("TPCS SCORE ERROR:", e && e.message);
+      return res.status(400).json({ ok: false, error: "TPCS_SCORE_ERROR", detail: e && e.message });
+    }
 
-    // 4) Email (plain text simple pour test – tu pourras remplacer par HTML)
-    const subject = `Ton résultat TPCS-DIFA : ${result.family} (${result.code_4L})`;
+    // 4) Email (personnalisation minimale L/A/R/C)
+    const subject = `Ton profil TPCS-DIFA : ${prof.famille} ${prof.type} – ${prof.code_4L}`;
     const text =
 `Bonjour ${firstName || ""},
 
-Merci d'avoir passé le test TPCS-DIFA.
-Famille : ${result.family}
-Code 4L : ${result.code_4L}
+Voici ton résultat TPCS-DIFA :
+- Code : ${prof.code_4L}
+- Famille : ${prof.famille}
+- Type : ${prof.type}
 
-Qualité:
-- Cohérence miroirs: ${result.quality.mirror_consistency.toFixed(2)}
-- Variabilité réponses: ${result.quality.response_variability.toFixed(2)}
-Flags: ${result.quality.flags.join(", ")}
+Scores:
+D1=${prof.scores.D1} (Attention), D2=${prof.scores.D2} (Récompense),
+D3=${prof.scores.D3} (Émotion),  D4=${prof.scores.D4} (Décision),
+D5=${prof.scores.D5} (Contexte), D6=${prof.scores.D6} (Introspection)
 
-À bientôt,
-L'équipe DIFA`;
+Nous te recontacterons très vite avec une interprétation détaillée et des micro-actions adaptées.
 
-    const ok = await sendEmail(email, subject, text);
-    if (!ok) {
+— Équipe DIFA`;
+
+    const okSend = await sendEmail(email, subject, text);
+    if (!okSend) {
       console.error("EMAIL_SEND_FAILED for", email);
       return res.status(500).json({ ok: false, error: "Email send failed" });
     }
@@ -236,9 +236,12 @@ L'équipe DIFA`;
     return res.status(200).json({
       ok: true,
       email,
-      family: result.family,
-      code_4L: result.code_4L,
-      quality: result.quality
+      profil: {
+        code_4L: prof.code_4L,
+        famille: prof.famille,
+        type: prof.type
+      },
+      scores: prof.scores
     });
 
   } catch (e) {
