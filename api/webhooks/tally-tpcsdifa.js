@@ -1,151 +1,140 @@
 // api/webhooks/tally-tpcsdifa.js
-// CommonJS (module.exports) – compatible Vercel Node runtime
+// CommonJS + Node 18 runtime
 
-// ----------------------
-// util: retirer accents + passer en minuscule
-function normalize(str) {
-  return (str || "")
-    .toString()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .trim();
-}
+const nodemailer = require("nodemailer");
 
-// ----------------------
-console.log("ENV DEBUG:", {
-  has_SMTP_USER: !!process.env.SMTP_USER,
-  has_SMTP_PASS: !!process.env.SMTP_PASS,
-  from_email: process.env.FROM_EMAIL || null
-});
+/* ---------------------- 1) CALCUL L/A/R/C ---------------------- */
 
-// Envoi d'e-mail via Gmail (SMTP) avec nodemailer
-async function sendEmail(to, subject, text) {
-  try {
-    const user = process.env.SMTP_USER;   // ex: "startdifa@gmail.com"
-    const pass = process.env.SMTP_PASS;   // mot de passe d’application (16 caractères)
-    const from = process.env.FROM_EMAIL || `DIFA <${user}>`;
-
-    if (!user || !pass) {
-      console.error("EMAIL DESACTIVE : SMTP_USER ou SMTP_PASS manquant");
-      return false;
-    }
-
-    const nodemailer = require("nodemailer");
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user, pass }
-    });
-
-    const info = await transporter.sendMail({ from, to, subject, text });
-    console.log("GMAIL ENVOYE :", info.messageId);
-    return true;
-  } catch (e) {
-    console.error("ERREUR ENVOI GMAIL :", e);
-    return false;
-  }
-}
-
-
-// ----------------------
-// ---------------- TPCS-DIFA — CALCUL OFFICIEL (L/A/R/C) ----------------
-
-/** Choix du tie-break si un score = 0.
- *  Par défaut: on tranche avec D6 (règle v3.1).
- *  Pour d'abord trancher avec D5 puis D6 en secours, remplace par: ["D5","D6"].
- */
-const TIE_BREAK_ORDER = ["D6"];
-
-/** Convertit les 24 LINEAR_SCALE Tally en {1..24: -3..+3} */
-function extractAnswersFromTallyFields(fields) {
-  const scales = fields.filter(f => f.type === "LINEAR_SCALE");
-  if (scales.length < 24) {
-    throw new Error(`Pas assez d'items LINEAR_SCALE (trouvés: ${scales.length}, attendus: 24)`);
-  }
-  const answers = {};
-  for (let i = 1; i <= 24; i++) {
-    const v = Number(scales[i-1].value ?? 0);
-    if (v < -3 || v > 3) throw new Error(`Item ${i}: valeur hors plage ${v}`);
-    answers[i] = v;
-  }
-  return answers;
-}
-
-/** Calcul complet (scores, code L/A/R/C, famille/type 16-profils) */
-function scoreTPCS_LARC(answers) {
+function scoreTPCS_LARC_fromAnswers(answersObj) {
+  // answersObj = { "1": int … "24": int } dans [-3..+3]
   const inv = new Set([2,4,6,8,10,12,14,16,18,20,22,24]);
-  const v = (i) => inv.has(i) ? -(Number(answers[i] ?? 0)) : Number(answers[i] ?? 0);
 
-  // Sommes par dimension
-  const D1 = v(1)+v(2)+v(3)+v(4);       // Attention: L vs F
-  const D2 = v(5)+v(6)+v(7)+v(8);       // Récompense: A vs I
-  const D3 = v(9)+v(10)+v(11)+v(12);    // Émotion: R vs E
-  const D4 = v(13)+v(14)+v(15)+v(16);   // Décision: C vs D
-  const D5 = v(17)+v(18)+v(19)+v(20);   // Contexte
-  const D6 = v(21)+v(22)+v(23)+v(24);   // Introspection
-
-  // Polarités (L/A/R/C) avec "OU" si 0
-  const pole = (s, pos, neg) => s>0 ? pos : (s<0 ? neg : "OU");
-
-  let L1 = pole(D1, "L", "F"); // Large vs Focalisé
-  let L2 = pole(D2, "A", "I"); // Activé vs Inhibé
-  let L3 = pole(D3, "R", "E"); // Régulés vs Réactifs
-  let L4 = pole(D4, "C", "D"); // Constructifs vs Défensifs
-
-  // Tie-breaks si "OU"
-  const tiePick = (neutralLetter, pos, neg) => {
-    if (neutralLetter !== "OU") return neutralLetter;
-    for (const key of TIE_BREAK_ORDER) {
-      const s = (key === "D5" ? D5 : D6);
-      if (s > 0) return pos;
-      if (s < 0) return neg;
+  const v = (i) => {
+    const raw = Number(answersObj[String(i)] ?? 0);
+    if (!Number.isFinite(raw) || raw < -3 || raw > 3) {
+      throw new Error(`Réponse invalide à l’item ${i} (valeur=${answersObj[String(i)]})`);
     }
-    return neutralLetter; // reste "OU" si tout est neutre
+    return inv.has(i) ? -raw : raw;
   };
 
-  L1 = tiePick(L1, "L", "F");
-  L2 = tiePick(L2, "A", "I");
-  L3 = tiePick(L3, "R", "E");
-  L4 = tiePick(L4, "C", "D");
+  const D1 = v(1)+v(2)+v(3)+v(4);
+  const D2 = v(5)+v(6)+v(7)+v(8);
+  const D3 = v(9)+v(10)+v(11)+v(12);
+  const D4 = v(13)+v(14)+v(15)+v(16);
+  const D5 = v(17)+v(18)+v(19)+v(20);
+  const D6 = v(21)+v(22)+v(23)+v(24);
 
-  const code_4L = `${L1}${L2}${L3}${L4}`; // ex: LIRD
+  const pole = (s, pos, neg) => (s > 0 ? pos : (s < 0 ? neg : "neutral"));
+  let L1 = pole(D1, "L", "F");
+  let L2 = pole(D2, "A", "I");
+  let L3 = pole(D3, "R", "E");
+  let L4 = pole(D4, "C", "D");
 
-  // Famille (D1×D2)
-  // L+A = Dynamiques | L+I = Inspirés | F+A = Centrés | F+I = Réceptifs
-  let famille;
-  if (L1 === "L" && L2 === "A") famille = "Dynamique";
-  else if (L1 === "L" && L2 === "I") famille = "Inspiré";
-  else if (L1 === "F" && L2 === "A") famille = "Centré";
-  else if (L1 === "F" && L2 === "I") famille = "Réceptif";
-  else famille = "Indéterminé"; // cas rare si "OU" subsiste
+  // Tie-break si neutral avec D6
+  if (L1 === "neutral") L1 = (D6 > 0 ? "L" : "F");
+  if (L2 === "neutral") L2 = (D6 > 0 ? "A" : "I");
+  if (L3 === "neutral") L3 = (D6 > 0 ? "R" : "E");
+  if (L4 === "neutral") L4 = (D6 > 0 ? "C" : "D");
 
-  // Type (D3×D4)
-  // R+C = Alpha | R+D = Beta | E+C = Gamma | E+D = Delta
-  let type;
-  if (L3 === "R" && L4 === "C") type = "Alpha";
-  else if (L3 === "R" && L4 === "D") type = "Beta";
-  else if (L3 === "E" && L4 === "C") type = "Gamma";
-  else if (L3 === "E" && L4 === "D") type = "Delta";
-  else type = "Mixte";
+  const code4 = `${L1}${L2}${L3}${L4}`;
+
+  // Famille par D3×D4
+  const family =
+    (L3 === "R" && L4 === "C") ? "Alpha" :
+    (L3 === "R" && L4 === "D") ? "Beta"  :
+    (L3 === "E" && L4 === "C") ? "Gamma" :
+    "Delta";
+
+  // Intensité helpful
+  const intensity = (s) => {
+    const a = Math.abs(s);
+    if (a === 0) return "none";
+    if (a <= 2) return "light";
+    if (a <= 5) return "moderate";
+    if (a <= 8) return "marked";
+    return "very_marked";
+  };
+
+  // QA miroirs
+  const pairs = [[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]];
+  let diffSum = 0;
+  for (const [d,i] of pairs) {
+    const direct = Number(answersObj[String(d)]);
+    const invv   = -Number(answersObj[String(i)]);
+    diffSum += Math.abs(direct - invv);
+  }
+  const meanDiff = diffSum / pairs.length;
+  const mirrorConsistency = 1 - (meanDiff/6);
+
+  const vals = Array.from({length:24}, (_,k)=>Number(answersObj[String(k+1)]));
+  const m = vals.reduce((a,b)=>a+b,0)/vals.length;
+  const sd = Math.sqrt(vals.reduce((s,x)=>s+(x-m)*(x-m),0)/vals.length);
+
+  const flags = [];
+  if (mirrorConsistency < 0.70) flags.push("low_consistency");
+  if (sd < 0.70)               flags.push("low_variability");
+  if (Math.max(Math.abs(D1),Math.abs(D2),Math.abs(D3),Math.abs(D4),Math.abs(D5),Math.abs(D6)) > 10) {
+    flags.push("atypical_profile");
+  }
+  if (flags.length === 0) flags.push("ok");
 
   return {
-    code_4L,                              // ex: "LIRD"
-    famille,                              // ex: "Inspiré"
-    type,                                 // ex: "Beta"
-    scores: { D1, D2, D3, D4, D5, D6 },   // sommes -12..+12
-    letters: { D1: L1, D2: L2, D3: L3, D4: L4 } // lettres finales
+    code_4L: code4,
+    family,
+    scores: {
+      D1_attention: { raw: D1, polarity: L1, intensity: intensity(D1) },
+      D2_reward:    { raw: D2, polarity: L2, intensity: intensity(D2) },
+      D3_emotion:   { raw: D3, polarity: L3, intensity: intensity(D3) },
+      D4_decision:  { raw: D4, polarity: L4, intensity: intensity(D4) },
+      D5_context:   { raw: D5 },
+      D6_intro:     { raw: D6 }
+    },
+    quality: {
+      mirror_consistency: mirrorConsistency,
+      response_variability: sd,
+      flags
+    }
   };
 }
 
-// ----------------------
-// Handler HTTP (CommonJS)
+/* ---------------------- 2) ENVOI EMAIL ---------------------- */
+
+async function sendEmail(to, subject, text) {
+  const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EXPÉDITEUR_EMAIL || process.env.EXPEDITEUR_EMAIL;
+  const SMTP_USER  = process.env.SMTP_USER  || process.env.DIFFA_GMAIL_USER || process.env.GMAIL_USER;
+  const SMTP_PASS  = process.env.SMTP_PASS  || process.env.DIFFA_GMAIL_PASS || process.env.GMAIL_PASS;
+
+  if (!SMTP_USER || !SMTP_PASS || !FROM_EMAIL) {
+    console.error("EMAIL DESACTIVE : SMTP_USER ou SMTP_PASS ou FROM_EMAIL manquant");
+    return false;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+
+  await transporter.sendMail({
+    from: FROM_EMAIL,
+    to,
+    subject,
+    text
+  });
+
+  console.log("GMAIL ENVOYE :", to);
+  return true;
+}
+
+/* ---------------------- 3) HANDLER HTTP ---------------------- */
+
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).send("Method Not Allowed");
   }
 
-  // DEBUG : log du payload reçu (visible dans Vercel > Journaux d’exécution)
   try { console.log("TALLY RAW BODY:", JSON.stringify(req.body)); } catch {}
 
   try {
@@ -153,95 +142,70 @@ module.exports = async function handler(req, res) {
     const data = body.data || {};
     const fields = Array.isArray(data.fields) ? data.fields : [];
 
-    // 1) Email — chercher dans data.fields (INPUT_EMAIL ou label contenant 'mail')
+    // email
     let email = null;
     for (const f of fields) {
       const lbl = (f.label || "").toString();
-      if (f.type === "INPUT_EMAIL" || /mail/i.test(lbl)) {
-        email = f.value;
-        break;
-      }
+      if (f.type === "INPUT_EMAIL" || /mail/i.test(lbl)) { email = f.value; break; }
     }
     if (!email) {
       console.warn("DEBUG: Missing email in fields[]");
       return res.status(400).json({ ok: false, error: "Missing email (fields)" });
     }
 
-    // (optionnel) Prénom pour personnaliser l’email
+    // prénom (optionnel)
     const firstNameField = fields.find(f => f.type === "INPUT_TEXT" && /pr[ée]nom/i.test(f.label || ""));
     const firstName = firstNameField?.value || "";
 
-    // 2) Réponses — prendre les 24 premiers LINEAR_SCALE dans l'ordre
-    const scaleItems = fields.filter(f => f.type === "LINEAR_SCALE");
+    // 24 échelles : accepter EN & FR
+    const isScale = (t) => t === "LINEAR_SCALE" || t === "ÉCHELLE_LINÉAIRE";
+    const scaleItems = fields.filter(f => isScale(f.type));
     if (scaleItems.length < 24) {
-      console.warn("DEBUG: Not enough LINEAR_SCALE items:", scaleItems.length);
-      return res.status(400).json({
-        ok: false,
-        error: `Need 24 LINEAR_SCALE items, got ${scaleItems.length}`
-      });
+      console.warn("DEBUG: Not enough scale items:", scaleItems.length);
+      return res.status(400).json({ ok: false, error: `Need 24 scale items, got ${scaleItems.length}` });
     }
 
-    // Construire answers { "1": int, ..., "24": int }
     const answers = {};
     for (let i = 0; i < 24; i++) {
-      const v = Number(scaleItems[i].value);
-      if (!Number.isFinite(v) || v < -3 || v > 3) {
-        console.warn("DEBUG: Invalid LINEAR_SCALE value at index", i, "raw:", scaleItems[i].value);
-        return res.status(400).json({
-          ok: false,
-          error: `Invalid LINEAR_SCALE at #${i+1}`,
-          raw: scaleItems[i].value
-        });
+      const raw = Number(scaleItems[i].value);
+      if (!Number.isFinite(raw) || raw < -3 || raw > 3) {
+        return res.status(400).json({ ok: false, error: `Invalid scale value at #${i+1}`, raw: scaleItems[i].value });
       }
-      answers[String(i + 1)] = v;
+      answers[String(i+1)] = raw;
     }
 
-       // 3) Calcul TPCS (version définitive L/A/R/C + 16 types)
-    const respondentId = data.respondentId || data.submissionId || body.submissionId || "unknown";
-    let prof;
-    try {
-      prof = scoreTPCS_LARC_fromAnswers(answers); // <-- utilise le answers que tu viens de construire
-      console.log("TPCS LARC RESULT:", { respondentId, ...prof });
-    } catch (e) {
-      console.error("TPCS SCORE ERROR:", e && e.message);
-      return res.status(400).json({ ok: false, error: "TPCS_SCORE_ERROR", detail: e && e.message });
-    }
+    // calcul L/A/R/C
+    const result = scoreTPCS_LARC_fromAnswers(answers);
+    console.log("TPCS LARC RESULT:", result);
 
-    // 4) Email (personnalisation minimale L/A/R/C)
-    const subject = `Ton profil TPCS-DIFA : ${prof.famille} ${prof.type} – ${prof.code_4L}`;
+    // email simple (tu pourras remplacer par HTML)
+    const subject = `Ton résultat TPCS-DIFA : ${result.family} (${result.code_4L})`;
     const text =
 `Bonjour ${firstName || ""},
 
-Voici ton résultat TPCS-DIFA :
-- Code : ${prof.code_4L}
-- Famille : ${prof.famille}
-- Type : ${prof.type}
+Merci d'avoir passé le test TPCS-DIFA.
+Famille : ${result.family}
+Code 4L : ${result.code_4L}
 
-Scores:
-D1=${prof.scores.D1} (Attention), D2=${prof.scores.D2} (Récompense),
-D3=${prof.scores.D3} (Émotion),  D4=${prof.scores.D4} (Décision),
-D5=${prof.scores.D5} (Contexte), D6=${prof.scores.D6} (Introspection)
+Qualité:
+- Cohérence miroirs: ${result.quality.mirror_consistency.toFixed(2)}
+- Variabilité réponses: ${result.quality.response_variability.toFixed(2)}
+Flags: ${result.quality.flags.join(", ")}
 
-Nous te recontacterons très vite avec une interprétation détaillée et des micro-actions adaptées.
+À bientôt,
+L'équipe DIFA`;
 
-— Équipe DIFA`;
-
-    const okSend = await sendEmail(email, subject, text);
-    if (!okSend) {
-      console.error("EMAIL_SEND_FAILED for", email);
+    const ok = await sendEmail(email, subject, text);
+    if (!ok) {
       return res.status(500).json({ ok: false, error: "Email send failed" });
     }
 
-    // 5) Réponse OK
     return res.status(200).json({
       ok: true,
       email,
-      profil: {
-        code_4L: prof.code_4L,
-        famille: prof.famille,
-        type: prof.type
-      },
-      scores: prof.scores
+      family: result.family,
+      code_4L: result.code_4L,
+      quality: result.quality
     });
 
   } catch (e) {
@@ -251,6 +215,6 @@ Nous te recontacterons très vite avec une interprétation détaillée et des mi
 };
 
 // Force le runtime Node.js 18 pour cette fonction
-module.exports.config = { runtime: 'nodejs18.x' };
+module.exports.config = { runtime: "nodejs18.x" };
 
 
